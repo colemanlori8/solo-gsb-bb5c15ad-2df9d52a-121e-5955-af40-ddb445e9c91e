@@ -7,6 +7,8 @@ interface TimelineProps {
   runtime: Record<string, NodeRuntime>;
   simTime: number;
   simActive: boolean;
+  /** 现场续排确认的待执行触发时间（仅本次模拟；待执行口令按此展示） */
+  replanStarts?: Record<string, number>;
 }
 
 const ROW_H = 26;
@@ -15,7 +17,7 @@ const PX_PER_SEC = 14;
 
 /** 甘特图：按排程展示每条口令的执行窗口，模拟时叠加当前时刻线。 */
 export function Timeline(props: TimelineProps) {
-  const { project, schedule, cycle, runtime, simTime, simActive } = props;
+  const { project, schedule, cycle, runtime, simTime, simActive, replanStarts } = props;
   if (!schedule || project.nodes.length === 0) {
     return <div className="timeline empty">暂无有效排程</div>;
   }
@@ -26,7 +28,14 @@ export function Timeline(props: TimelineProps) {
   const rows = [...project.nodes].sort(
     (a, b) => (schedule.starts[a.id] ?? 0) - (schedule.starts[b.id] ?? 0),
   );
-  const tEnd = Math.max(schedule.makespan, backward?.deadline ?? 0);
+  // 时间轴末端需覆盖续排后可能延后的待执行口令
+  let maxBarEnd = schedule.makespan;
+  for (const n of project.nodes) {
+    const rt = runtime[n.id];
+    const end = rt?.end ?? (replanStarts?.[n.id] ?? schedule.starts[n.id] ?? 0) + n.duration;
+    if (end > maxBarEnd) maxBarEnd = end;
+  }
+  const tEnd = Math.max(maxBarEnd, backward?.deadline ?? 0);
   const width = Math.max(tEnd * PX_PER_SEC + 40, 200);
   const height = rows.length * ROW_H + 24;
 
@@ -61,8 +70,10 @@ export function Timeline(props: TimelineProps) {
           const start = schedule.starts[n.id] ?? 0;
           const rt = runtime[n.id];
           const status = rt?.status ?? 'pending';
-          const barStart = rt?.start ?? start;
-          const barEnd = rt?.end ?? start + n.duration;
+          // 待执行口令优先按续排确认的触发时间展示
+          const replanned = status === 'pending' ? replanStarts?.[n.id] : undefined;
+          const barStart = rt?.start ?? replanned ?? start;
+          const barEnd = rt?.end ?? barStart + n.duration;
           const float = backward?.floats[n.id];
           const isCritical = criticalNodes.has(n.id);
           return (
@@ -91,7 +102,7 @@ export function Timeline(props: TimelineProps) {
                 width={Math.max((barEnd - barStart) * PX_PER_SEC, 3)}
                 height={ROW_H - 8}
                 rx={4}
-                className={`bar status-${status} ${cycleNodes.has(n.id) ? 'cycle' : ''} ${isCritical ? 'critical' : ''}`}
+                className={`bar status-${status} ${cycleNodes.has(n.id) ? 'cycle' : ''} ${isCritical ? 'critical' : ''} ${replanned !== undefined ? 'replanned' : ''}`}
               />
               <text
                 x={LABEL_W + barStart * PX_PER_SEC + 5}

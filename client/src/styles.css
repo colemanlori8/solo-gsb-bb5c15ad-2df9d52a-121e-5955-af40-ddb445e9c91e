@@ -489,6 +489,59 @@ button.danger { background: transparent; border-color: var(--red); color: var(--
 .deadline-line.overrun { stroke: var(--red); }
 .bar-label { fill: #dfe4ee; font-size: 10px; pointer-events: none; }
 .now-line { stroke: var(--red); stroke-width: 1.5; }
+.bar.replanned { stroke: var(--amber); stroke-width: 1.5; stroke-dasharray: 4 3; }
+
+/* ---------- 现场续排 ---------- */
+.replan-flag {
+  color: var(--amber);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.replan-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 12, 16, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 30;
+}
+.replan-dialog {
+  width: min(640px, calc(100vw - 48px));
+  max-height: min(72vh, 640px);
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.replan-dialog h3 { margin: 0 0 4px; font-size: 14px; }
+.replan-dialog .hint { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 6px 0; }
+.replan-dialog .overrun-hint { color: var(--red); }
+.replan-dialog .cycle-path { margin-top: 6px; }
+.replan-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 8px 0;
+}
+.replan-table th,
+.replan-table td {
+  border: 1px solid var(--border);
+  padding: 5px 8px;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+.replan-table th { color: var(--muted); font-weight: 500; background: var(--panel-2); }
+.replan-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+.replan-actions button { padding: 5px 18px; }
+.delta-down { color: var(--green); font-size: 11px; }
 
 .boot-message {
   height: 100%;

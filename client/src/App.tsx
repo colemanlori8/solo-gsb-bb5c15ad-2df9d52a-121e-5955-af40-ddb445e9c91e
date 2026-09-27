@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { loadProject, saveProject } from './api';
 import { CrewPanel } from './CrewPanel';
 import { GraphCanvas, Selection } from './GraphCanvas';
-import { computeCrewSchedule, computeSchedule } from './schedule';
+import { ReplanPanel } from './ReplanPanel';
+import { computeCrewSchedule, computeReplan, computeSchedule } from './schedule';
 import { SidePanel } from './SidePanel';
 import { Timeline } from './Timeline';
 import { BreakPeriod, CommandNode, Project, ScheduleResult } from './types';
@@ -81,6 +82,29 @@ export default function App() {
   const cycle = schedule && !schedule.ok ? schedule.cycle : undefined;
 
   const sim = useSimulation(project ?? EMPTY, effectiveSchedule);
+
+  // 现场续排：仅在暂停时打开；离开暂停（继续/重置）自动关闭
+  const [replanOpen, setReplanOpen] = useState(false);
+  useEffect(() => {
+    if (sim.state !== 'paused') setReplanOpen(false);
+  }, [sim.state]);
+
+  // 暂停时刻的续排试算（纯内存，复用现有排程与模拟状态，不写入项目）
+  const replan = useMemo(
+    () => (replanOpen ? computeReplan(project ?? EMPTY, sim.runtime, sim.time) : null),
+    [replanOpen, project, sim.runtime, sim.time],
+  );
+
+  // 待执行口令的现行触发时间：已确认的续排结果优先，否则取最早排程
+  const currentTriggerStarts = useMemo(() => {
+    const out: Record<string, number> = {};
+    if (!project) return out;
+    for (const n of project.nodes) {
+      const t = sim.replanStarts[n.id] ?? effectiveSchedule?.starts[n.id];
+      if (t !== undefined) out[n.id] = t;
+    }
+    return out;
+  }, [project, sim.replanStarts, effectiveSchedule]);
 
   // 本地持久化（防抖）
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -236,6 +260,10 @@ export default function App() {
   const canStart = project.nodes.length > 0 && sim.state !== 'running' && sim.state !== 'paused';
   const deadline = project.deadline;
   const backward = effectiveSchedule?.backward;
+  // 已确认续排且仍在待执行的口令数（用于工具栏提示）
+  const replanPending = Object.keys(sim.replanStarts).filter(
+    (id) => (sim.runtime[id]?.status ?? 'pending') === 'pending',
+  ).length;
 
   return (
     <div className="app">
@@ -253,10 +281,19 @@ export default function App() {
           <button className="primary" onClick={sim.resume}>⏵ 继续</button>
         )}
         <button disabled={sim.state === 'idle'} onClick={sim.reset}>⟲ 重置</button>
+        {sim.state === 'paused' && (
+          <button
+            title="以当前模拟时刻为待执行口令的最早起点，按前置等待、锁定口令的人手占用、班组容量与休息时段重排最早可行空档"
+            onClick={() => setReplanOpen(true)}
+          >
+            ⚙ 现场续排
+          </button>
+        )}
         <span className="sim-clock">
           {sim.state !== 'idle' && `t = ${sim.time.toFixed(1)}s`}
           {sim.state === 'finished' && ' · 全部完成'}
         </span>
+        {replanPending > 0 && <span className="replan-flag">已续排 {replanPending} 条</span>}
         <span className="sep" />
         <label className="deadline-toggle" title="按全部后继约束反向计算最晚开始与浮动">
           <input
@@ -353,7 +390,24 @@ export default function App() {
         runtime={sim.runtime}
         simTime={sim.time}
         simActive={simActive || sim.state === 'finished'}
+        replanStarts={sim.replanStarts}
       />
+
+      {replanOpen && (
+        <ReplanPanel
+          project={project}
+          result={replan}
+          cycle={cycle}
+          currentStarts={currentTriggerStarts}
+          now={sim.time}
+          onConfirm={(starts) => {
+            // 仅更新本次模拟的待执行触发时间，不写入项目
+            sim.applyReplan(starts);
+            setReplanOpen(false);
+          }}
+          onClose={() => setReplanOpen(false)}
+        />
+      )}
     </div>
   );
 }

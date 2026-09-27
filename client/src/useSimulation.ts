@@ -7,10 +7,14 @@ export interface Simulation {
   state: SimState;
   time: number;
   runtime: Record<string, NodeRuntime>;
+  /** 现场续排确认后的待执行触发时间（仅本次模拟；开始/重置时清空） */
+  replanStarts: Record<string, number>;
   start: () => void;
   pause: () => void;
   resume: () => void;
   reset: () => void;
+  /** 暂停中确认现场续排：仅更新待执行口令的触发时间，不写入项目 */
+  applyReplan: (starts: Record<string, number>) => void;
 }
 
 /**
@@ -18,12 +22,15 @@ export interface Simulation {
  * - start/pause/resume/reset 控制时钟；
  * - 排程或口令图变化时，仅同步“尚未执行”的口令的排定时间，
  *   正在执行与已完成的口令保持其实际记录不变；
- * - 排定时间被改到过去且仍未执行的口令，会在下一拍立即补发。
+ * - 排定时间被改到过去且仍未执行的口令，会在下一拍立即补发；
+ * - 暂停中可通过现场续排（applyReplan）覆盖待执行口令的触发时间，
+ *   仅作用于本次模拟，开始/重置时清空。
  */
 export function useSimulation(project: Project, schedule: ScheduleResult | null): Simulation {
   const [state, setState] = useState<SimState>('idle');
   const [time, setTime] = useState(0);
   const [runtime, setRuntime] = useState<Record<string, NodeRuntime>>({});
+  const [replanStarts, setReplanStarts] = useState<Record<string, number>>({});
 
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -33,8 +40,10 @@ export function useSimulation(project: Project, schedule: ScheduleResult | null)
   scheduleRef.current = schedule;
   const projectRef = useRef(project);
   projectRef.current = project;
+  const replanRef = useRef(replanStarts);
+  replanRef.current = replanStarts;
 
-  // 口令图结构变化：移除已删除口令的运行记录，为新增口令补登记。
+  // 口令图结构变化：移除已删除口令的运行记录与续排触发时间，为新增口令补登记。
   useEffect(() => {
     if (stateRef.current === 'idle') return;
     setRuntime((prev) => {
@@ -43,6 +52,16 @@ export function useSimulation(project: Project, schedule: ScheduleResult | null)
         next[n.id] = prev[n.id] ?? { status: 'pending' };
       }
       return next;
+    });
+    setReplanStarts((prev) => {
+      const ids = new Set(project.nodes.map((n) => n.id));
+      const next: Record<string, number> = {};
+      let changed = false;
+      for (const [id, t] of Object.entries(prev)) {
+        if (ids.has(id)) next[id] = t;
+        else changed = true;
+      }
+      return changed ? next : prev;
     });
   }, [project]);
 
@@ -60,7 +79,8 @@ export function useSimulation(project: Project, schedule: ScheduleResult | null)
         for (const n of proj.nodes) {
           const rt = next[n.id] ?? { status: 'pending' as const };
           if (rt.status === 'pending') {
-            const scheduledStart = sched?.starts[n.id];
+            // 续排确认过的触发时间优先于排程时间
+            const scheduledStart = replanRef.current[n.id] ?? sched?.starts[n.id];
             if (scheduledStart !== undefined && scheduledStart <= now) {
               const actualStart = Math.max(scheduledStart, now);
               next[n.id] = {
@@ -97,6 +117,7 @@ export function useSimulation(project: Project, schedule: ScheduleResult | null)
     const initial: Record<string, NodeRuntime> = {};
     for (const n of projectRef.current.nodes) initial[n.id] = { status: 'pending' };
     setRuntime(initial);
+    setReplanStarts({});
     timeRef.current = 0;
     setTime(0);
     setState('running');
@@ -115,7 +136,14 @@ export function useSimulation(project: Project, schedule: ScheduleResult | null)
     timeRef.current = 0;
     setTime(0);
     setRuntime({});
+    setReplanStarts({});
   }, []);
 
-  return { state, time, runtime, start, pause, resume, reset };
+  // 现场续排：仅暂停中可确认；整体替换待执行口令的触发时间（仅本次模拟）
+  const applyReplan = useCallback((starts: Record<string, number>) => {
+    if (stateRef.current !== 'paused') return;
+    setReplanStarts(starts);
+  }, []);
+
+  return { state, time, runtime, replanStarts, start, pause, resume, reset, applyReplan };
 }

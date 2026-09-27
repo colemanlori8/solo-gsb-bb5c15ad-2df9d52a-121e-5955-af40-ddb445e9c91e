@@ -102,6 +102,32 @@ export interface CrewScheduleResult {
   cycle?: CycleInfo;
 }
 
+/** 现场续排：被锁定的口令（已完成取实际结束，执行中取实际起止） */
+export interface ReplanLocked {
+  nodeId: string;
+  status: 'running' | 'done';
+  /** 实际开始时间（秒） */
+  start: number;
+  /** 实际/预计结束时间（秒） */
+  end: number;
+}
+
+/** 现场续排结果：锁定口令保持实际记录，为待执行口令给出最早可行新起止 */
+export interface ReplanResult {
+  ok: boolean;
+  /** 被锁定的口令（已完成 / 执行中）及其实际起止 */
+  locked: ReplanLocked[];
+  /** 待执行口令的新排定起止 */
+  assignments: CrewAssignment[];
+  /** 全部口令的开始时间（锁定口令为实际开始，待执行为新排定开始） */
+  starts: Record<string, number>;
+  /** 按新计划全部完成的总时长（秒，相对排程零点） */
+  makespan: number;
+  /** 交叠或相邻休息时段合并后的半开零容量区间（升序、互不交叠） */
+  mergedBreaks: Array<{ start: number; end: number }>;
+  cycle?: CycleInfo;
+}
+
 export type SimState = 'idle' | 'running' | 'paused' | 'finished';
 
 export type NodeStatus = 'pending' | 'running' | 'done';
