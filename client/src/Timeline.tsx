@@ -7,15 +7,17 @@ interface TimelineProps {
   runtime: Record<string, NodeRuntime>;
   simTime: number;
   simActive: boolean;
+  /** 现场续排确认后的待执行触发时间（仅本次模拟有效；待执行口令按此展示与触发） */
+  replanStarts?: Record<string, number> | null;
 }
 
 const ROW_H = 26;
 const LABEL_W = 110;
 const PX_PER_SEC = 14;
 
-/** 甘特图：按排程展示每条口令的执行窗口，模拟时叠加当前时刻线。 */
+/** 甘特图：按排程展示每条口令的执行窗口，模拟时叠加当前时刻线；续排应用后待执行口令按新触发时间展示。 */
 export function Timeline(props: TimelineProps) {
-  const { project, schedule, cycle, runtime, simTime, simActive } = props;
+  const { project, schedule, cycle, runtime, simTime, simActive, replanStarts } = props;
   if (!schedule || project.nodes.length === 0) {
     return <div className="timeline empty">暂无有效排程</div>;
   }
@@ -23,10 +25,14 @@ export function Timeline(props: TimelineProps) {
   const cycleNodes = new Set(cycle?.nodeIds ?? []);
   const backward = schedule.backward;
   const criticalNodes = new Set(backward?.criticalNodeIds ?? []);
-  const rows = [...project.nodes].sort(
-    (a, b) => (schedule.starts[a.id] ?? 0) - (schedule.starts[b.id] ?? 0),
+  // 待执行口令的展示起点：续排触发时间优先于排程
+  const startOf = (id: string) => replanStarts?.[id] ?? schedule.starts[id] ?? 0;
+  const rows = [...project.nodes].sort((a, b) => startOf(a.id) - startOf(b.id));
+  const tEnd = Math.max(
+    schedule.makespan,
+    backward?.deadline ?? 0,
+    ...project.nodes.map((n) => startOf(n.id) + n.duration),
   );
-  const tEnd = Math.max(schedule.makespan, backward?.deadline ?? 0);
   const width = Math.max(tEnd * PX_PER_SEC + 40, 200);
   const height = rows.length * ROW_H + 24;
 
@@ -58,7 +64,7 @@ export function Timeline(props: TimelineProps) {
         )}
         {rows.map((n, i) => {
           const y = 20 + i * ROW_H;
-          const start = schedule.starts[n.id] ?? 0;
+          const start = startOf(n.id);
           const rt = runtime[n.id];
           const status = rt?.status ?? 'pending';
           const barStart = rt?.start ?? start;

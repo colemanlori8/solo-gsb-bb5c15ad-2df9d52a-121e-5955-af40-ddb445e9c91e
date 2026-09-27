@@ -7,10 +7,14 @@ export interface Simulation {
   state: SimState;
   time: number;
   runtime: Record<string, NodeRuntime>;
+  /** 现场续排确认后应用的待执行触发时间（仅本次模拟有效，重置时清空） */
+  overrides: Record<string, number> | null;
   start: () => void;
   pause: () => void;
   resume: () => void;
   reset: () => void;
+  /** 应用现场续排结果：仅更新待执行口令的触发时间，不写入口令图 */
+  applyReplan: (starts: Record<string, number>) => void;
 }
 
 /**
@@ -18,12 +22,15 @@ export interface Simulation {
  * - start/pause/resume/reset 控制时钟；
  * - 排程或口令图变化时，仅同步“尚未执行”的口令的排定时间，
  *   正在执行与已完成的口令保持其实际记录不变；
- * - 排定时间被改到过去且仍未执行的口令，会在下一拍立即补发。
+ * - 排定时间被改到过去且仍未执行的口令，会在下一拍立即补发；
+ * - 现场续排确认后，待执行口令改用续排触发时间（override 优先于排程），
+ *   重置或重新开始时清空续排结果。
  */
 export function useSimulation(project: Project, schedule: ScheduleResult | null): Simulation {
   const [state, setState] = useState<SimState>('idle');
   const [time, setTime] = useState(0);
   const [runtime, setRuntime] = useState<Record<string, NodeRuntime>>({});
+  const [overrides, setOverrides] = useState<Record<string, number> | null>(null);
 
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -33,10 +40,14 @@ export function useSimulation(project: Project, schedule: ScheduleResult | null)
   scheduleRef.current = schedule;
   const projectRef = useRef(project);
   projectRef.current = project;
+  const overridesRef = useRef(overrides);
+  overridesRef.current = overrides;
 
-  // 口令图结构变化：移除已删除口令的运行记录，为新增口令补登记。
+  // 口令图结构变化：移除已删除口令的运行记录，为新增口令补登记；
+  // 同时清空续排结果——编辑后未执行口令回到“按新排程同步”的既有语义。
   useEffect(() => {
     if (stateRef.current === 'idle') return;
+    setOverrides(null);
     setRuntime((prev) => {
       const next: Record<string, NodeRuntime> = {};
       for (const n of project.nodes) {
@@ -60,7 +71,8 @@ export function useSimulation(project: Project, schedule: ScheduleResult | null)
         for (const n of proj.nodes) {
           const rt = next[n.id] ?? { status: 'pending' as const };
           if (rt.status === 'pending') {
-            const scheduledStart = sched?.starts[n.id];
+            // 续排触发时间优先于排程时间（仅本次模拟有效）
+            const scheduledStart = overridesRef.current?.[n.id] ?? sched?.starts[n.id];
             if (scheduledStart !== undefined && scheduledStart <= now) {
               const actualStart = Math.max(scheduledStart, now);
               next[n.id] = {
@@ -97,6 +109,7 @@ export function useSimulation(project: Project, schedule: ScheduleResult | null)
     const initial: Record<string, NodeRuntime> = {};
     for (const n of projectRef.current.nodes) initial[n.id] = { status: 'pending' };
     setRuntime(initial);
+    setOverrides(null); // 新一次模拟不带入上次续排结果
     timeRef.current = 0;
     setTime(0);
     setState('running');
@@ -115,7 +128,12 @@ export function useSimulation(project: Project, schedule: ScheduleResult | null)
     timeRef.current = 0;
     setTime(0);
     setRuntime({});
+    setOverrides(null); // 重置时清空续排结果
   }, []);
 
-  return { state, time, runtime, start, pause, resume, reset };
+  const applyReplan = useCallback((starts: Record<string, number>) => {
+    setOverrides({ ...starts });
+  }, []);
+
+  return { state, time, runtime, overrides, start, pause, resume, reset, applyReplan };
 }

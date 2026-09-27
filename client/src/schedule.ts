@@ -1,4 +1,4 @@
-import { BackwardInfo, BreakPeriod, CommandEdge, CrewAssignment, CrewScheduleResult, CycleInfo, Project, ScheduleResult } from './types';
+import { BackwardInfo, BreakPeriod, CommandEdge, CrewAssignment, CrewScheduleResult, CycleInfo, NodeRuntime, Project, ReplanItem, ReplanResult, ScheduleResult } from './types';
 
 const EPS = 1e-9;
 
@@ -371,6 +371,138 @@ function fitsAt(
     if (o.start > t && o.start < end && usedAt(o.start) + crew > capacity) return false;
   }
   return true;
+}
+
+/**
+ * 现场续排（纯内存，不写入口令图）：模拟暂停时以当前时刻 now 为基准，
+ * 为全部待执行口令寻找最早可行空档。
+ *
+ * - 已完成口令按实际结束锁定，执行中口令按实际起止锁定，
+ *   其人手占用 [实际开始, 实际结束) 计入容量占用；
+ * - 待执行口令的允许时刻 = max(now, 全部前置的（排定/实际结束 + 约束等待）)，
+ *   即“以当前模拟时刻为待执行口令的最早起点”；
+ * - 每轮从全部前置已就绪的待执行口令中按（允许时刻, 口令 ID 字典序）选一条，
+ *   用与班组排程相同的规则放入不超班组容量、不压合并后休息时段的最早位置（允许回填）；
+ * - 零时长或用人数为 0 的口令不占人、不受休息时段限制；
+ * - plannedStarts 为当前模拟正在使用的触发计划（含此前已应用的续排），用于计算差值；
+ * - 图有环时返回 ok=false 与成环路径，续排不可用。
+ */
+export function computeLiveReplan(
+  project: Project,
+  runtime: Record<string, NodeRuntime>,
+  now: number,
+  plannedStarts: Record<string, number>,
+): ReplanResult {
+  const mergedBreaks = mergeBreaks(project.breaks);
+  const base = computeSchedule(project);
+  if (!base.ok) {
+    return { ok: false, now, items: [], lockedRunning: [], lockedDoneCount: 0, makespan: 0, cycle: base.cycle };
+  }
+
+  const { nodes, edges } = project;
+  const capacity = normalizedCrewSize(project.crewSize);
+  const crewOf = new Map(nodes.map((n) => [n.id, normalizedCrew(n.crew)]));
+  const durationOf = new Map(nodes.map((n) => [n.id, n.duration]));
+
+  // 口令分类：已完成 / 执行中锁定实际记录，待执行参与续排
+  const lockedRunning: { nodeId: string; start: number; end: number }[] = [];
+  let lockedDoneCount = 0;
+  const lockedFinish = new Map<string, number>(); // 锁定口令的（实际/预计）结束时刻
+  const occupancy: { start: number; end: number; crew: number }[] = [];
+  for (const n of nodes) {
+    const rt = runtime[n.id];
+    if (rt?.status === 'done') {
+      lockedDoneCount++;
+      lockedFinish.set(n.id, rt.end ?? now);
+    } else if (rt?.status === 'running') {
+      const start = rt.start ?? now;
+      const end = rt.end ?? start + n.duration;
+      lockedRunning.push({ nodeId: n.id, start, end });
+      lockedFinish.set(n.id, end);
+      const crew = Math.min(crewOf.get(n.id) ?? 0, capacity);
+      if (end > start && crew > 0) occupancy.push({ start, end, crew });
+    }
+  }
+
+  // 仅待执行口令参与重排；前置为锁定口令时，允许时刻取其（实际/预计）结束 + 约束等待
+  const pending = new Set(
+    nodes.filter((n) => (runtime[n.id]?.status ?? 'pending') === 'pending').map((n) => n.id),
+  );
+  const indegree = new Map<string, number>();
+  const outgoing = new Map<string, { to: string; minDelay: number }[]>();
+  const allowed = new Map<string, number>();
+  for (const id of pending) {
+    indegree.set(id, 0);
+    outgoing.set(id, []);
+    allowed.set(id, now); // 以当前模拟时刻为最早起点
+  }
+  for (const e of edges) {
+    if (!pending.has(e.to)) continue;
+    if (pending.has(e.from)) {
+      indegree.set(e.to, (indegree.get(e.to) ?? 0) + 1);
+      outgoing.get(e.from)!.push({ to: e.to, minDelay: e.minDelay });
+    } else {
+      const finish = lockedFinish.get(e.from);
+      if (finish !== undefined) {
+        const cand = finish + e.minDelay;
+        if (cand > allowed.get(e.to)!) allowed.set(e.to, cand);
+      }
+    }
+  }
+
+  const ready: string[] = [];
+  for (const [id, deg] of indegree) {
+    if (deg === 0) ready.push(id);
+  }
+
+  const items: ReplanItem[] = [];
+  let makespan = 0;
+  while (ready.length > 0) {
+    // 按（允许时刻, 口令 ID 字典序）取最小
+    let best = 0;
+    for (let i = 1; i < ready.length; i++) {
+      const ta = allowed.get(ready[i])!;
+      const tb = allowed.get(ready[best])!;
+      if (ta < tb - EPS || (Math.abs(ta - tb) < EPS && ready[i] < ready[best])) best = i;
+    }
+    const id = ready.splice(best, 1)[0];
+
+    const duration = durationOf.get(id) ?? 0;
+    const crew = Math.min(crewOf.get(id) ?? 0, capacity);
+    const occupies = duration > 0 && crew > 0;
+    const start = occupies
+      ? earliestFit(occupancy, mergedBreaks, allowed.get(id)!, duration, crew, capacity)
+      : allowed.get(id)!;
+    const end = start + duration;
+
+    const plannedStart = plannedStarts[id] ?? start;
+    items.push({
+      nodeId: id,
+      plannedStart,
+      plannedEnd: plannedStart + duration,
+      newStart: start,
+      newEnd: end,
+      delta: start - plannedStart,
+    });
+    if (occupies) occupancy.push({ start, end, crew });
+    makespan = Math.max(makespan, end);
+
+    for (const { to, minDelay } of outgoing.get(id) ?? []) {
+      const cand = end + minDelay;
+      if (cand > allowed.get(to)!) allowed.set(to, cand);
+      const deg = indegree.get(to)! - 1;
+      indegree.set(to, deg);
+      if (deg === 0) ready.push(to);
+    }
+  }
+  // 总完成时刻含锁定口令（已完成口令的实际结束、执行中口令的实际结束）
+  for (const finish of lockedFinish.values()) makespan = Math.max(makespan, finish);
+
+  items.sort((a, b) =>
+    a.newStart !== b.newStart ? a.newStart - b.newStart : a.nodeId < b.nodeId ? -1 : 1,
+  );
+
+  return { ok: true, now, items, lockedRunning, lockedDoneCount, makespan };
 }
 
 /** 增量预演：内存中对单项改动（口令持续时长 / 约束等待秒数）试算 */

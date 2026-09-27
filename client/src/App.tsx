@@ -2,10 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { loadProject, saveProject } from './api';
 import { CrewPanel } from './CrewPanel';
 import { GraphCanvas, Selection } from './GraphCanvas';
-import { computeCrewSchedule, computeSchedule } from './schedule';
+import { ReplanPanel } from './ReplanPanel';
+import { computeCrewSchedule, computeLiveReplan, computeSchedule } from './schedule';
 import { SidePanel } from './SidePanel';
 import { Timeline } from './Timeline';
-import { BreakPeriod, CommandNode, Project, ScheduleResult } from './types';
+import { BreakPeriod, CommandNode, Project, ReplanResult, ScheduleResult } from './types';
 import { useSimulation } from './useSimulation';
 
 const EMPTY: Project = { nodes: [], edges: [] };
@@ -81,6 +82,47 @@ export default function App() {
   const cycle = schedule && !schedule.ok ? schedule.cycle : undefined;
 
   const sim = useSimulation(project ?? EMPTY, effectiveSchedule);
+
+  // 现场续排预览（仅暂停时打开；纯内存试算，确认前不影响任何状态）
+  const [replanPreview, setReplanPreview] = useState<ReplanResult | null>(null);
+
+  // 当前模拟正在使用的触发计划：续排覆盖优先，其次为生效排程
+  const plannedStarts = useMemo(() => {
+    const starts: Record<string, number> = {};
+    if (project && effectiveSchedule) {
+      for (const n of project.nodes) {
+        starts[n.id] = sim.overrides?.[n.id] ?? effectiveSchedule.starts[n.id] ?? 0;
+      }
+    }
+    return starts;
+  }, [project, effectiveSchedule, sim.overrides]);
+
+  // 离开暂停状态时关闭预览；预览打开期间口令图 / 运行状态变化时按同一基准时刻重算
+  useEffect(() => {
+    if (sim.state !== 'paused') {
+      setReplanPreview(null);
+      return;
+    }
+    setReplanPreview((prev) =>
+      prev && project ? computeLiveReplan(project, sim.runtime, sim.time, plannedStarts) : prev,
+    );
+  }, [sim.state, project, sim.runtime, sim.time, plannedStarts]);
+
+  const openReplan = useCallback(() => {
+    if (sim.state !== 'paused' || !project) return;
+    setReplanPreview(computeLiveReplan(project, sim.runtime, sim.time, plannedStarts));
+  }, [sim.state, sim.runtime, sim.time, project, plannedStarts]);
+
+  // 确认续排：仅更新本次模拟的待执行触发时间，不写入口令图
+  const confirmReplan = useCallback(() => {
+    if (!replanPreview?.ok) return;
+    const starts: Record<string, number> = {};
+    for (const it of replanPreview.items) starts[it.nodeId] = it.newStart;
+    sim.applyReplan(starts);
+    setReplanPreview(null);
+  }, [replanPreview, sim]);
+
+  const cancelReplan = useCallback(() => setReplanPreview(null), []);
 
   // 本地持久化（防抖）
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -253,9 +295,17 @@ export default function App() {
           <button className="primary" onClick={sim.resume}>⏵ 继续</button>
         )}
         <button disabled={sim.state === 'idle'} onClick={sim.reset}>⟲ 重置</button>
+        <button
+          disabled={sim.state !== 'paused'}
+          title={cycle ? '暂停时可试算现场续排；当前存在环依赖，打开后仅显示成环路径' : '暂停时以当前时刻为基准，为待执行口令重排最早可行计划'}
+          onClick={openReplan}
+        >
+          ⇄ 现场续排
+        </button>
         <span className="sim-clock">
           {sim.state !== 'idle' && `t = ${sim.time.toFixed(1)}s`}
           {sim.state === 'finished' && ' · 全部完成'}
+          {sim.overrides && sim.state !== 'idle' && ' · 已续排'}
         </span>
         <span className="sep" />
         <label className="deadline-toggle" title="按全部后继约束反向计算最晚开始与浮动">
@@ -323,6 +373,14 @@ export default function App() {
             onMoveNode={moveNode}
             onAddEdge={addEdge}
           />
+          {replanPreview && (
+            <ReplanPanel
+              project={project}
+              result={replanPreview}
+              onConfirm={confirmReplan}
+              onCancel={cancelReplan}
+            />
+          )}
         </div>
         <SidePanel
           project={project}
@@ -353,6 +411,7 @@ export default function App() {
         runtime={sim.runtime}
         simTime={sim.time}
         simActive={simActive || sim.state === 'finished'}
+        replanStarts={sim.overrides}
       />
     </div>
   );
